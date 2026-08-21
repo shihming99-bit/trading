@@ -25,10 +25,11 @@ CSV_OI = os.path.join(DATA_DIR, "taifex_oi.csv")
 URL_FUND = "https://stock.wearn.com/fundthree.asp"
 CSV_FUND = os.path.join(DATA_DIR, "fund_netbuy.csv")
 
-# 全市場收盤價（每日覆蓋，不累積歷史）— 改用官方 API
-# 證交所（上市）與櫃買中心（上櫃）的每日全市場收盤 JSON
-URL_PRICE_TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-URL_PRICE_TPEX = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
+# 全市場收盤價（每日覆蓋，不累積歷史）— 官方即時端點（盤後約16:00更新）
+# 證交所 MI_INDEX：多表 JSON，個股收盤在「每日收盤行情」表；type=ALLBUT0999 為全部（不含權證等）
+URL_PRICE_TWSE = "https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&type=ALLBUT0999"
+# 櫃買中心（上櫃）每日收盤行情
+URL_PRICE_TPEX = "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes?response=json"
 CSV_PRICE = os.path.join(DATA_DIR, "prices.csv")
 
 # 連線設定：GitHub Actions 從國外連台灣站點偶有逾時，故加大 timeout 並重試
@@ -187,75 +188,142 @@ def _fetch_json(url: str):
     raise RuntimeError(f"連線 {url} 連續 {MAX_RETRIES} 次失敗：{last_err}")
 
 
-def _pick(d: dict, *keys):
-    """從 dict 取第一個存在且非空的鍵值。"""
-    for k in keys:
-        if k in d and str(d[k]).strip() not in ("", "--", "null", "None"):
-            return str(d[k]).strip()
+def _roc_title_to_iso(title: str) -> str:
+    """從表標題抓民國日期 '115年08月21日' -> '2026-08-21'；抓不到回空字串。"""
+    m = _re.search(r"(\d{2,3})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", str(title or ""))
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y + 1911:04d}-{mo:02d}-{d:02d}"
     return ""
 
 
-def _parse_close_rows(arr, code_keys, name_keys, close_keys, change_keys, date_keys, market):
+def _sign_from_html(s) -> int:
+    """MI_INDEX 漲跌欄含 HTML：color:red=+1、color:green=-1、其餘=0。"""
+    s = str(s)
+    if "color:red" in s or ">+<" in s:
+        return 1
+    if "color:green" in s or ">-<" in s:
+        return -1
+    return 0
+
+
+def _find_table(tables, must_have):
+    for t in tables:
+        fields = " ".join(str(x) for x in t.get("fields", []))
+        if all(k in fields for k in must_have):
+            return t
+    return None
+
+
+def _col_idx(fields, *keys):
+    for i, f in enumerate(fields):
+        if any(k in str(f) for k in keys):
+            return i
+    return None
+
+
+def _parse_mi_index(payload):
+    """證交所 MI_INDEX：回傳 (rows, iso_date)。rows=[ticker,name,close,change,market]。"""
+    tables = payload.get("tables") or []
+    t = _find_table(tables, ["證券代號", "收盤價"])
+    if t is None:
+        raise RuntimeError("MI_INDEX 找不到『每日收盤行情』表")
+    fields = t["fields"]
+    ci = _col_idx(fields, "證券代號")
+    cn = _col_idx(fields, "證券名稱")
+    cc = _col_idx(fields, "收盤價")
+    csign = _col_idx(fields, "漲跌(+/-)", "漲跌(+/–)")
+    cdiff = _col_idx(fields, "漲跌價差")
+    iso = _roc_title_to_iso(t.get("title", ""))
     rows = []
-    for d in arr:
-        if not isinstance(d, dict):
-            continue
-        tk = _pick(d, *code_keys).replace(" ", "")
+    for r in t.get("data", []):
+        tk = str(r[ci]).strip()
         if not TICKER_RE.match(tk):
             continue
-        raw_close = _pick(d, *close_keys).replace(",", "")
         try:
-            close = float(raw_close)
+            close = float(str(r[cc]).replace(",", "").strip())
         except ValueError:
-            continue                       # 無成交（如 "--"）跳過
-        raw_chg = _pick(d, *change_keys).replace(",", "").replace("+", "")
+            continue
+        change = ""
+        if cdiff is not None:
+            try:
+                mag = float(str(r[cdiff]).replace(",", "").strip())
+                sign = _sign_from_html(r[csign]) if csign is not None else 0
+                change = mag * (sign if sign != 0 else 1)
+            except ValueError:
+                change = ""
+        name = str(r[cn]).strip() if cn is not None else ""
+        rows.append([tk, name, close, change, "TWSE"])
+    return rows, iso
+
+
+def _parse_tpex(payload):
+    """櫃買 dailyQuotes：結構隨版本略異，盡量容錯。回傳 (rows, iso_date)。"""
+    iso = ""
+    data, fields = None, None
+    if isinstance(payload, dict) and payload.get("tables"):
+        t = _find_table(payload["tables"], ["收盤"]) or payload["tables"][0]
+        fields = t.get("fields", [])
+        data = t.get("data", [])
+        iso = _roc_title_to_iso(t.get("title", ""))
+    elif isinstance(payload, dict) and "aaData" in payload:
+        data = payload["aaData"]
+        fields = None
+    elif isinstance(payload, list):
+        data = payload
+    if not data:
+        return [], iso
+    if fields and any("收盤" in str(f) for f in fields):
+        ci = _col_idx(fields, "代號", "股票代號", "SecuritiesCompanyCode")
+        cn = _col_idx(fields, "名稱", "CompanyName")
+        cc = _col_idx(fields, "收盤")
+        cdiff = _col_idx(fields, "漲跌")
+    else:
+        ci, cn, cc, cdiff = 0, 1, 2, 3   # 舊格式固定位置
+    rows = []
+    for r in data:
+        vals = list(r.values()) if isinstance(r, dict) else r
         try:
-            change = float(raw_chg)
-        except ValueError:
-            change = ""                    # 漲跌缺值時留空，不影響收盤
-        name = _pick(d, *name_keys)
-        # 交易日：優先用 API 回傳的民國日期（如 1150820）轉西元，取不到才留空
-        raw_date = _pick(d, *date_keys)
-        trade_date = ""
-        if _re.match(r"^\d{7}$", raw_date):
-            trade_date = f"{int(raw_date[:3]) + 1911:04d}-{raw_date[3:5]}-{raw_date[5:]}"
-        rows.append([tk, name, close, change, market, trade_date])
-    return rows
+            tk = str(vals[ci]).strip()
+        except Exception:
+            continue
+        if not TICKER_RE.match(tk):
+            continue
+        try:
+            close = float(str(vals[cc]).replace(",", "").replace("---", "").strip())
+        except (ValueError, IndexError):
+            continue
+        change = ""
+        if cdiff is not None:
+            try:
+                change = float(str(vals[cdiff]).replace(",", "").replace("+", "").strip())
+            except (ValueError, IndexError):
+                change = ""
+        try:
+            name = str(vals[cn]).strip() if cn is not None else ""
+        except IndexError:
+            name = ""
+        rows.append([tk, name, close, change, "TPEx"])
+    return rows, iso
 
 
 def fetch_prices_all():
-    """證交所(上市)＋櫃買(上櫃) 全市場收盤價，合併為一份。"""
+    """證交所(上市 MI_INDEX)＋櫃買(上櫃) 全市場收盤價，合併為一份。"""
     today_iso = dt.date.today().isoformat()
-    all_rows, notes = [], []
+    all_rows, notes, iso_date = [], [], ""
 
-    # 上市（TWSE）
     try:
-        arr = _fetch_json(URL_PRICE_TWSE)
-        rows = _parse_close_rows(
-            arr,
-            code_keys=["Code", "code"],
-            name_keys=["Name", "name"],
-            close_keys=["ClosingPrice", "Close", "close"],
-            change_keys=["Change", "change"],
-            date_keys=["Date", "date"],
-            market="TWSE")
+        rows, iso = _parse_mi_index(_fetch_json(URL_PRICE_TWSE))
         all_rows += rows
+        iso_date = iso or iso_date
         notes.append(f"上市 {len(rows)} 檔")
     except Exception as e:
         notes.append(f"上市失敗（{e}）")
 
-    # 上櫃（TPEx）
     try:
-        arr = _fetch_json(URL_PRICE_TPEX)
-        rows = _parse_close_rows(
-            arr,
-            code_keys=["SecuritiesCompanyCode", "Code", "code", "股票代號"],
-            name_keys=["CompanyName", "Name", "name", "名稱"],
-            close_keys=["Close", "ClosingPrice", "close", "收盤"],
-            change_keys=["Change", "change", "漲跌", "漲跌價差"],
-            date_keys=["Date", "date", "日期"],
-            market="TPEx")
+        rows, iso = _parse_tpex(_fetch_json(URL_PRICE_TPEX))
         all_rows += rows
+        iso_date = iso_date or iso
         notes.append(f"上櫃 {len(rows)} 檔")
     except Exception as e:
         notes.append(f"上櫃失敗（{e}）")
@@ -263,25 +331,20 @@ def fetch_prices_all():
     if not all_rows:
         raise RuntimeError("上市與上櫃皆抓取失敗：" + "；".join(notes))
 
-    out = pd.DataFrame(all_rows, columns=["ticker", "name", "close", "change", "market", "date"])
+    out = pd.DataFrame(all_rows, columns=["ticker", "name", "close", "change", "market"])
     out = out.drop_duplicates(subset="ticker", keep="first").reset_index(drop=True)
-    # date 用 API 回傳的真實交易日；若缺值才退回執行日
-    out["date"] = out["date"].replace("", pd.NA).fillna(today_iso)
-    # 額外印出資料實際交易日，方便在 log 一眼確認抓到哪一天
-    tds = sorted(set(out["date"]) - {today_iso}) or sorted(set(out["date"]))
-    notes.append(f"資料交易日 {'/'.join(tds[:3])}")
+    out["date"] = iso_date or today_iso     # 用資料標題的真實交易日
+    notes.append(f"交易日 {iso_date or '(用執行日)'}")
     return out[["ticker", "name", "close", "change", "market", "date"]], notes
 
 
 def run_prices():
-    # 測試用：可用 MOCK_PRICE_JSON 指定本地 JSON（上市格式）
     mock = os.environ.get("MOCK_PRICE_JSON")
     if mock:
-        arr = _json.load(open(mock, encoding="utf-8"))
-        rows = _parse_close_rows(arr, ["Code"], ["Name"], ["ClosingPrice"], ["Change"], ["Date"], "TWSE")
-        out = pd.DataFrame(rows, columns=["ticker", "name", "close", "change", "market", "date"])
-        out["date"] = out["date"].replace("", pd.NA).fillna(dt.date.today().isoformat())
-        notes = [f"mock {len(rows)} 檔"]
+        rows, iso = _parse_mi_index(_json.load(open(mock, encoding="utf-8")))
+        out = pd.DataFrame(rows, columns=["ticker", "name", "close", "change", "market"])
+        out["date"] = iso or dt.date.today().isoformat()
+        notes = [f"mock {len(rows)} 檔，交易日 {iso}"]
     else:
         out, notes = fetch_prices_all()
     os.makedirs(os.path.dirname(CSV_PRICE), exist_ok=True)
