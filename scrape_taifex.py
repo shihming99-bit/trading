@@ -24,6 +24,10 @@ CSV_OI = os.path.join(DATA_DIR, "taifex_oi.csv")
 URL_FUND = "https://stock.wearn.com/fundthree.asp"
 CSV_FUND = os.path.join(DATA_DIR, "fund_netbuy.csv")
 
+# 全市場收盤價（每日覆蓋，不累積歷史）
+URL_PRICE = "https://stock.wearn.com/today.asp"
+CSV_PRICE = os.path.join(DATA_DIR, "prices.csv")
+
 # 連線設定：GitHub Actions 從國外連台灣站點偶有逾時，故加大 timeout 並重試
 TIMEOUT = 45          # 秒
 MAX_RETRIES = 5       # 逾時／連線失敗時的重試次數
@@ -156,6 +160,121 @@ def normalize_fund(t: pd.DataFrame) -> pd.DataFrame:
     return out[["date"] + FUND_COLS].reset_index(drop=True)
 
 
+# ---------- 全市場收盤價（每日覆蓋）----------
+import re as _re
+
+TICKER_RE = _re.compile(r"^\d{4,6}[A-Z]?$")   # 2330 / 00981A / 6719 等
+
+
+def _looks_numeric(x):
+    x = str(x).replace(",", "").strip()
+    try:
+        float(x)
+        return True
+    except ValueError:
+        return False
+
+
+def pick_price_table(tables):
+    """全市場收盤表通常是頁面上『含收盤欄且列數最多』的表。"""
+    best, best_rows = None, 0
+    for t in tables:
+        s = t.astype(str)
+        head = " ".join(s.head(3).values.ravel().tolist())
+        has_close = ("收盤" in head) or ("成交" in head)
+        has_id = ("代號" in head) or ("代碼" in head) or ("名稱" in head) or ("股" in head)
+        if has_close and has_id and len(t) > best_rows:
+            best, best_rows = t, len(t)
+    return best
+
+
+def normalize_prices(t: pd.DataFrame) -> pd.DataFrame:
+    df = t.astype(str)
+    hi = 0
+    for i in range(min(4, len(df))):
+        row = " ".join(df.iloc[i].tolist())
+        if ("收盤" in row) or ("代號" in row):
+            hi = i
+            break
+    header = df.iloc[hi].tolist()
+
+    def find_col(keys):
+        for j, name in enumerate(header):
+            if any(k in name for k in keys):
+                return j
+        return None
+
+    c_id = find_col(["代號", "代碼"])
+    c_name = find_col(["名稱", "股名", "商品"])
+    c_close = find_col(["收盤"])
+
+    body = df.iloc[hi + 1:].reset_index(drop=True)
+
+    # 以「資料樣態」補強：若欄名找不到代號欄，找出多數列符合代號樣式的欄
+    if c_id is None:
+        for j in range(body.shape[1]):
+            col = body.iloc[:, j].astype(str).str.replace(r"\s", "", regex=True)
+            hit = col.str.match(TICKER_RE).mean()
+            if hit > 0.6:
+                c_id = j
+                break
+    if c_id is None:
+        raise RuntimeError(f"找不到代號欄。實際標頭：{header}")
+
+    # 收盤欄找不到時，取代號欄右側第一個「多數為數字」的欄
+    if c_close is None:
+        for j in range(c_id + 1, body.shape[1]):
+            col = body.iloc[:, j].astype(str)
+            if col.map(_looks_numeric).mean() > 0.6:
+                c_close = j
+                break
+    if c_close is None:
+        raise RuntimeError(f"找不到收盤欄。實際標頭：{header}")
+
+    rows = []
+    for _, r in body.iterrows():
+        tk = str(r.iloc[c_id]).replace(" ", "").strip()
+        if not TICKER_RE.match(tk):
+            continue
+        close = str(r.iloc[c_close]).replace(",", "").strip()
+        try:
+            close = float(close)
+        except ValueError:
+            continue
+        name = str(r.iloc[c_name]).strip() if c_name is not None else ""
+        rows.append([tk, name, close])
+
+    if not rows:
+        raise RuntimeError(f"收盤表解析後無有效列。標頭：{header}")
+
+    out = pd.DataFrame(rows, columns=["ticker", "name", "close"])
+    out = out.drop_duplicates(subset="ticker", keep="first").reset_index(drop=True)
+    out["date"] = dt.date.today().isoformat()
+    print(f"    收盤欄位定位 → 代號:{c_id} 名稱:{c_name} 收盤:{c_close}；"
+          f"標頭樣本：{header[:min(len(header),10)]}")
+    return out
+
+
+def write_prices(new: pd.DataFrame, path: str) -> int:
+    """全市場價格每日覆蓋（不合併歷史）。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    new.to_csv(path, index=False)
+    return len(new)
+
+
+def run_prices():
+    src = os.environ.get("MOCK_PRICE")
+    tables = (pd.read_html(io.StringIO(open(src, encoding="utf-8").read()))
+              if src else fetch_tables(URL_PRICE))
+    t = pick_price_table(tables)
+    if t is None:
+        heads = [" | ".join(x.astype(str).iloc[0].tolist()[:8]) for x in tables[:8]]
+        raise RuntimeError("找不到收盤表。頁面表頭樣本：" + " ‖ ".join(heads))
+    new = normalize_prices(t)
+    n = write_prices(new, CSV_PRICE)
+    print(f"[{dt.datetime.now():%Y-%m-%d %H:%M}] 收盤價：寫入 {n} 檔（{new['date'].iloc[0]}）。")
+
+
 # ---------- 通用合併 ----------
 def merge_csv(new: pd.DataFrame, path: str) -> tuple[int, int]:
     if os.path.exists(path):
@@ -184,7 +303,7 @@ def run_one(label, url, mock_env, picker, normalizer, csv_path):
 
 def main():
     errors = []
-    # 兩份資料彼此獨立：其中一份失敗不影響另一份
+    # 三份資料彼此獨立：其中一份失敗不影響其他
     for args in [
         ("未平倉", URL_OI, "MOCK_HTML", pick_oi_table, normalize_oi, CSV_OI),
         ("買賣超", URL_FUND, "MOCK_FUND", pick_fund_table, normalize_fund, CSV_FUND),
@@ -194,6 +313,12 @@ def main():
         except Exception as e:
             errors.append(f"{args[0]}：{e}")
             print(f"  ⚠ {args[0]} 抓取失敗：{e}", file=sys.stderr)
+    # 全市場收盤價（覆蓋式，獨立處理）
+    try:
+        run_prices()
+    except Exception as e:
+        errors.append(f"收盤價：{e}")
+        print(f"  ⚠ 收盤價抓取失敗：{e}", file=sys.stderr)
     if errors:
         raise RuntimeError("；".join(errors))
 
