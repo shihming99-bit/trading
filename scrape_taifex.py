@@ -8,6 +8,7 @@
 import io
 import os
 import sys
+import time
 import datetime as dt
 
 import requests
@@ -15,6 +16,11 @@ import pandas as pd
 
 URL = "https://stock.wearn.com/taifexphoto.asp"          # k 省略＝台指期
 CSV_PATH = os.path.join(os.path.dirname(__file__), "data", "taifex_oi.csv")
+
+# 連線設定：GitHub Actions 從國外連台灣站點偶有逾時，故加大 timeout 並重試
+TIMEOUT = 45          # 秒
+MAX_RETRIES = 5       # 逾時／連線失敗時的重試次數
+BACKOFF = 8           # 每次重試前的等待秒數（遞增）
 
 # 目標欄位（對應 wearn 表格）
 COLS = ["date_roc", "top5", "top10", "top5_sp", "top10_sp",
@@ -24,7 +30,11 @@ HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/124.0 Safari/537.36"),
-    "Accept-Language": "zh-TW,zh;q=0.9",
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,*/*;q=0.8"),
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    "Connection": "keep-alive",
+    "Referer": "https://stock.wearn.com/",
 }
 
 
@@ -34,12 +44,31 @@ def roc_to_iso(roc: str) -> str:
     return f"{int(y) + 1911:04d}-{int(m):02d}-{int(d):02d}"
 
 
+def fetch_html() -> str:
+    """帶重試的抓取；逾時或連線錯誤會等待後重試，最後才拋出。"""
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.get(URL, headers=HEADERS, timeout=TIMEOUT)
+            r.raise_for_status()
+            r.encoding = "utf-8"
+            return r.text
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            last_err = e
+            wait = BACKOFF * attempt
+            print(f"  第 {attempt}/{MAX_RETRIES} 次連線失敗（{type(e).__name__}），"
+                  f"{wait}s 後重試…", file=sys.stderr)
+            time.sleep(wait)
+        except requests.exceptions.HTTPError as e:
+            # HTTP 4xx/5xx 不重試，直接拋出
+            raise
+    raise RuntimeError(f"連線 wearn 連續 {MAX_RETRIES} 次失敗：{last_err}")
+
+
 def fetch_tables() -> list[pd.DataFrame]:
-    r = requests.get(URL, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    r.encoding = "utf-8"
     # pandas.read_html 會回傳頁面上所有 <table>
-    return pd.read_html(io.StringIO(r.text))
+    return pd.read_html(io.StringIO(fetch_html()))
 
 
 def pick_oi_table(tables: list[pd.DataFrame]) -> pd.DataFrame:
