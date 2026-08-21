@@ -7,6 +7,7 @@
 
 import io
 import os
+import re as _re
 import sys
 import time
 import datetime as dt
@@ -24,8 +25,10 @@ CSV_OI = os.path.join(DATA_DIR, "taifex_oi.csv")
 URL_FUND = "https://stock.wearn.com/fundthree.asp"
 CSV_FUND = os.path.join(DATA_DIR, "fund_netbuy.csv")
 
-# 全市場收盤價（每日覆蓋，不累積歷史）
-URL_PRICE = "https://stock.wearn.com/today.asp"
+# 全市場收盤價（每日覆蓋，不累積歷史）— 改用官方 API
+# 證交所（上市）與櫃買中心（上櫃）的每日全市場收盤 JSON
+URL_PRICE_TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+URL_PRICE_TPEX = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes"
 CSV_PRICE = os.path.join(DATA_DIR, "prices.csv")
 
 # 連線設定：GitHub Actions 從國外連台灣站點偶有逾時，故加大 timeout 並重試
@@ -160,120 +163,113 @@ def normalize_fund(t: pd.DataFrame) -> pd.DataFrame:
     return out[["date"] + FUND_COLS].reset_index(drop=True)
 
 
-# ---------- 全市場收盤價（每日覆蓋）----------
-import re as _re
+# ---------- 全市場收盤價（官方 API，每日覆蓋）----------
+import json as _json
+import urllib.request as _urlreq
 
 TICKER_RE = _re.compile(r"^\d{4,6}[A-Z]?$")   # 2330 / 00981A / 6719 等
 
 
-def _looks_numeric(x):
-    x = str(x).replace(",", "").strip()
-    try:
-        float(x)
-        return True
-    except ValueError:
-        return False
+def _fetch_json(url: str):
+    """帶重試的 JSON 抓取（官方 API）。"""
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            req = _urlreq.Request(url, headers={"User-Agent": HEADERS["User-Agent"]})
+            with _urlreq.urlopen(req, timeout=TIMEOUT) as resp:
+                return _json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            last_err = e
+            wait = BACKOFF * attempt
+            print(f"  第 {attempt}/{MAX_RETRIES} 次 API 連線失敗（{type(e).__name__}），"
+                  f"{wait}s 後重試…", file=sys.stderr)
+            time.sleep(wait)
+    raise RuntimeError(f"連線 {url} 連續 {MAX_RETRIES} 次失敗：{last_err}")
 
 
-def pick_price_table(tables):
-    """全市場收盤表通常是頁面上『含收盤欄且列數最多』的表。"""
-    best, best_rows = None, 0
-    for t in tables:
-        s = t.astype(str)
-        # 逐格轉字串再 join，避免 float/NaN 造成 join 失敗
-        head = " ".join(str(v) for v in s.head(3).values.ravel())
-        has_close = ("收盤" in head) or ("成交" in head)
-        has_id = ("代號" in head) or ("代碼" in head) or ("名稱" in head) or ("股" in head)
-        if has_close and has_id and len(t) > best_rows:
-            best, best_rows = t, len(t)
-    return best
+def _pick(d: dict, *keys):
+    """從 dict 取第一個存在且非空的鍵值。"""
+    for k in keys:
+        if k in d and str(d[k]).strip() not in ("", "--", "null", "None"):
+            return str(d[k]).strip()
+    return ""
 
 
-def normalize_prices(t: pd.DataFrame) -> pd.DataFrame:
-    df = t.astype(str)
-    hi = 0
-    for i in range(min(4, len(df))):
-        row = " ".join(str(v) for v in df.iloc[i].tolist())
-        if ("收盤" in row) or ("代號" in row):
-            hi = i
-            break
-    header = [str(v) for v in df.iloc[hi].tolist()]
-
-    def find_col(keys):
-        for j, name in enumerate(header):
-            if any(k in name for k in keys):
-                return j
-        return None
-
-    c_id = find_col(["代號", "代碼"])
-    c_name = find_col(["名稱", "股名", "商品"])
-    c_close = find_col(["收盤"])
-
-    body = df.iloc[hi + 1:].reset_index(drop=True)
-
-    # 以「資料樣態」補強：若欄名找不到代號欄，找出多數列符合代號樣式的欄
-    if c_id is None:
-        for j in range(body.shape[1]):
-            col = body.iloc[:, j].astype(str).str.replace(r"\s", "", regex=True)
-            hit = col.str.match(TICKER_RE).mean()
-            if hit > 0.6:
-                c_id = j
-                break
-    if c_id is None:
-        raise RuntimeError(f"找不到代號欄。實際標頭：{header}")
-
-    # 收盤欄找不到時，取代號欄右側第一個「多數為數字」的欄
-    if c_close is None:
-        for j in range(c_id + 1, body.shape[1]):
-            col = body.iloc[:, j].astype(str)
-            if col.map(_looks_numeric).mean() > 0.6:
-                c_close = j
-                break
-    if c_close is None:
-        raise RuntimeError(f"找不到收盤欄。實際標頭：{header}")
-
+def _parse_close_rows(arr, code_keys, name_keys, close_keys, market):
     rows = []
-    for _, r in body.iterrows():
-        tk = str(r.iloc[c_id]).replace(" ", "").strip()
+    for d in arr:
+        if not isinstance(d, dict):
+            continue
+        tk = _pick(d, *code_keys).replace(" ", "")
         if not TICKER_RE.match(tk):
             continue
-        close = str(r.iloc[c_close]).replace(",", "").strip()
+        raw_close = _pick(d, *close_keys).replace(",", "")
         try:
-            close = float(close)
+            close = float(raw_close)
         except ValueError:
-            continue
-        name = str(r.iloc[c_name]).strip() if c_name is not None else ""
-        rows.append([tk, name, close])
+            continue                       # 無成交（如 "--"）跳過
+        name = _pick(d, *name_keys)
+        rows.append([tk, name, close, market])
+    return rows
 
-    if not rows:
-        raise RuntimeError(f"收盤表解析後無有效列。標頭：{header}")
 
-    out = pd.DataFrame(rows, columns=["ticker", "name", "close"])
+def fetch_prices_all():
+    """證交所(上市)＋櫃買(上櫃) 全市場收盤價，合併為一份。"""
+    today_iso = dt.date.today().isoformat()
+    all_rows, notes = [], []
+
+    # 上市（TWSE）
+    try:
+        arr = _fetch_json(URL_PRICE_TWSE)
+        rows = _parse_close_rows(
+            arr,
+            code_keys=["Code", "code"],
+            name_keys=["Name", "name"],
+            close_keys=["ClosingPrice", "Close", "close"],
+            market="TWSE")
+        all_rows += rows
+        notes.append(f"上市 {len(rows)} 檔")
+    except Exception as e:
+        notes.append(f"上市失敗（{e}）")
+
+    # 上櫃（TPEx）
+    try:
+        arr = _fetch_json(URL_PRICE_TPEX)
+        rows = _parse_close_rows(
+            arr,
+            code_keys=["SecuritiesCompanyCode", "Code", "code", "股票代號"],
+            name_keys=["CompanyName", "Name", "name", "名稱"],
+            close_keys=["Close", "ClosingPrice", "close", "收盤"],
+            market="TPEx")
+        all_rows += rows
+        notes.append(f"上櫃 {len(rows)} 檔")
+    except Exception as e:
+        notes.append(f"上櫃失敗（{e}）")
+
+    if not all_rows:
+        raise RuntimeError("上市與上櫃皆抓取失敗：" + "；".join(notes))
+
+    out = pd.DataFrame(all_rows, columns=["ticker", "name", "close", "market"])
     out = out.drop_duplicates(subset="ticker", keep="first").reset_index(drop=True)
-    out["date"] = dt.date.today().isoformat()
-    print(f"    收盤欄位定位 → 代號:{c_id} 名稱:{c_name} 收盤:{c_close}；"
-          f"標頭樣本：{header[:min(len(header),10)]}")
-    return out
-
-
-def write_prices(new: pd.DataFrame, path: str) -> int:
-    """全市場價格每日覆蓋（不合併歷史）。"""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    new.to_csv(path, index=False)
-    return len(new)
+    out["date"] = today_iso
+    return out[["ticker", "name", "close", "market", "date"]], notes
 
 
 def run_prices():
-    src = os.environ.get("MOCK_PRICE")
-    tables = (pd.read_html(io.StringIO(open(src, encoding="utf-8").read()))
-              if src else fetch_tables(URL_PRICE))
-    t = pick_price_table(tables)
-    if t is None:
-        heads = [" | ".join(str(v) for v in x.astype(str).iloc[0].tolist()[:8]) for x in tables[:8]]
-        raise RuntimeError("找不到收盤表。頁面表頭樣本：" + " ‖ ".join(heads))
-    new = normalize_prices(t)
-    n = write_prices(new, CSV_PRICE)
-    print(f"[{dt.datetime.now():%Y-%m-%d %H:%M}] 收盤價：寫入 {n} 檔（{new['date'].iloc[0]}）。")
+    # 測試用：可用 MOCK_PRICE_JSON 指定本地 JSON（上市格式）
+    mock = os.environ.get("MOCK_PRICE_JSON")
+    if mock:
+        arr = _json.load(open(mock, encoding="utf-8"))
+        rows = _parse_close_rows(arr, ["Code"], ["Name"], ["ClosingPrice"], "TWSE")
+        out = pd.DataFrame(rows, columns=["ticker", "name", "close", "market"])
+        out["date"] = dt.date.today().isoformat()
+        notes = [f"mock {len(rows)} 檔"]
+    else:
+        out, notes = fetch_prices_all()
+    os.makedirs(os.path.dirname(CSV_PRICE), exist_ok=True)
+    out.to_csv(CSV_PRICE, index=False)
+    print(f"[{dt.datetime.now():%Y-%m-%d %H:%M}] 收盤價：寫入 {len(out)} 檔"
+          f"（{'、'.join(notes)}）。")
 
 
 # ---------- 通用合併 ----------
