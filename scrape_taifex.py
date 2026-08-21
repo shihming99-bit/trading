@@ -91,7 +91,7 @@ def header_row_index(df: pd.DataFrame) -> int:
 # ---------- 台指期未平倉 ----------
 def pick_oi_table(tables):
     for t in tables:
-        joined = " ".join(t.astype(str).head(3).values.ravel().tolist())
+        joined = " ".join(str(v) for v in t.astype(str).head(3).values.ravel())
         if "外資" in joined and "收盤" in joined:
             return t
     raise RuntimeError("找不到台指期未平倉表，wearn 版面可能已改動。")
@@ -128,7 +128,7 @@ def pick_fund_table(tables):
     """含日期、投信、外資三者的那張明細表（非上方統計小表）。"""
     for t in tables:
         s = t.astype(str)
-        joined = " ".join(s.head(3).values.ravel().tolist())
+        joined = " ".join(str(v) for v in s.head(3).values.ravel())
         if "日期" in joined and "投信" in joined and "外資" in joined:
             return t
     raise RuntimeError("找不到三大法人買賣超表，wearn 版面可能已改動。")
@@ -180,7 +180,8 @@ def pick_price_table(tables):
     best, best_rows = None, 0
     for t in tables:
         s = t.astype(str)
-        head = " ".join(s.head(3).values.ravel().tolist())
+        # 逐格轉字串再 join，避免 float/NaN 造成 join 失敗
+        head = " ".join(str(v) for v in s.head(3).values.ravel())
         has_close = ("收盤" in head) or ("成交" in head)
         has_id = ("代號" in head) or ("代碼" in head) or ("名稱" in head) or ("股" in head)
         if has_close and has_id and len(t) > best_rows:
@@ -192,11 +193,11 @@ def normalize_prices(t: pd.DataFrame) -> pd.DataFrame:
     df = t.astype(str)
     hi = 0
     for i in range(min(4, len(df))):
-        row = " ".join(df.iloc[i].tolist())
+        row = " ".join(str(v) for v in df.iloc[i].tolist())
         if ("收盤" in row) or ("代號" in row):
             hi = i
             break
-    header = df.iloc[hi].tolist()
+    header = [str(v) for v in df.iloc[hi].tolist()]
 
     def find_col(keys):
         for j, name in enumerate(header):
@@ -268,7 +269,7 @@ def run_prices():
               if src else fetch_tables(URL_PRICE))
     t = pick_price_table(tables)
     if t is None:
-        heads = [" | ".join(x.astype(str).iloc[0].tolist()[:8]) for x in tables[:8]]
+        heads = [" | ".join(str(v) for v in x.astype(str).iloc[0].tolist()[:8]) for x in tables[:8]]
         raise RuntimeError("找不到收盤表。頁面表頭樣本：" + " ‖ ".join(heads))
     new = normalize_prices(t)
     n = write_prices(new, CSV_PRICE)
