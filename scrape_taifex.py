@@ -195,7 +195,7 @@ def _pick(d: dict, *keys):
     return ""
 
 
-def _parse_close_rows(arr, code_keys, name_keys, close_keys, change_keys, market):
+def _parse_close_rows(arr, code_keys, name_keys, close_keys, change_keys, date_keys, market):
     rows = []
     for d in arr:
         if not isinstance(d, dict):
@@ -214,7 +214,12 @@ def _parse_close_rows(arr, code_keys, name_keys, close_keys, change_keys, market
         except ValueError:
             change = ""                    # 漲跌缺值時留空，不影響收盤
         name = _pick(d, *name_keys)
-        rows.append([tk, name, close, change, market])
+        # 交易日：優先用 API 回傳的民國日期（如 1150820）轉西元，取不到才留空
+        raw_date = _pick(d, *date_keys)
+        trade_date = ""
+        if _re.match(r"^\d{7}$", raw_date):
+            trade_date = f"{int(raw_date[:3]) + 1911:04d}-{raw_date[3:5]}-{raw_date[5:]}"
+        rows.append([tk, name, close, change, market, trade_date])
     return rows
 
 
@@ -232,6 +237,7 @@ def fetch_prices_all():
             name_keys=["Name", "name"],
             close_keys=["ClosingPrice", "Close", "close"],
             change_keys=["Change", "change"],
+            date_keys=["Date", "date"],
             market="TWSE")
         all_rows += rows
         notes.append(f"上市 {len(rows)} 檔")
@@ -247,6 +253,7 @@ def fetch_prices_all():
             name_keys=["CompanyName", "Name", "name", "名稱"],
             close_keys=["Close", "ClosingPrice", "close", "收盤"],
             change_keys=["Change", "change", "漲跌", "漲跌價差"],
+            date_keys=["Date", "date", "日期"],
             market="TPEx")
         all_rows += rows
         notes.append(f"上櫃 {len(rows)} 檔")
@@ -256,9 +263,13 @@ def fetch_prices_all():
     if not all_rows:
         raise RuntimeError("上市與上櫃皆抓取失敗：" + "；".join(notes))
 
-    out = pd.DataFrame(all_rows, columns=["ticker", "name", "close", "change", "market"])
+    out = pd.DataFrame(all_rows, columns=["ticker", "name", "close", "change", "market", "date"])
     out = out.drop_duplicates(subset="ticker", keep="first").reset_index(drop=True)
-    out["date"] = today_iso
+    # date 用 API 回傳的真實交易日；若缺值才退回執行日
+    out["date"] = out["date"].replace("", pd.NA).fillna(today_iso)
+    # 額外印出資料實際交易日，方便在 log 一眼確認抓到哪一天
+    tds = sorted(set(out["date"]) - {today_iso}) or sorted(set(out["date"]))
+    notes.append(f"資料交易日 {'/'.join(tds[:3])}")
     return out[["ticker", "name", "close", "change", "market", "date"]], notes
 
 
@@ -267,9 +278,9 @@ def run_prices():
     mock = os.environ.get("MOCK_PRICE_JSON")
     if mock:
         arr = _json.load(open(mock, encoding="utf-8"))
-        rows = _parse_close_rows(arr, ["Code"], ["Name"], ["ClosingPrice"], ["Change"], "TWSE")
-        out = pd.DataFrame(rows, columns=["ticker", "name", "close", "change", "market"])
-        out["date"] = dt.date.today().isoformat()
+        rows = _parse_close_rows(arr, ["Code"], ["Name"], ["ClosingPrice"], ["Change"], ["Date"], "TWSE")
+        out = pd.DataFrame(rows, columns=["ticker", "name", "close", "change", "market", "date"])
+        out["date"] = out["date"].replace("", pd.NA).fillna(dt.date.today().isoformat())
         notes = [f"mock {len(rows)} 檔"]
     else:
         out, notes = fetch_prices_all()
