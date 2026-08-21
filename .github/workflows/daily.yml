@@ -1,0 +1,43 @@
+name: 台指期未平倉每日更新
+
+on:
+  schedule:
+    - cron: "30 14 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: taifex-daily
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出 repo
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝套件
+        run: pip install requests pandas lxml beautifulsoup4
+
+      - name: 執行抓取
+        run: python scrape_taifex.py
+
+      - name: 提交更新
+        run: |
+          git config user.name  "taifex-bot"
+          git config user.email "actions@github.com"
+          git add data/taifex_oi.csv
+          if git diff --staged --quiet; then
+            echo "資料無變化，略過提交。"
+          else
+            git commit -m "data: 更新台指期未平倉 $(date -u +%Y-%m-%d)"
+            git push
+          fi
