@@ -195,7 +195,7 @@ def _pick(d: dict, *keys):
     return ""
 
 
-def _parse_close_rows(arr, code_keys, name_keys, close_keys, market):
+def _parse_close_rows(arr, code_keys, name_keys, close_keys, change_keys, market):
     rows = []
     for d in arr:
         if not isinstance(d, dict):
@@ -208,8 +208,13 @@ def _parse_close_rows(arr, code_keys, name_keys, close_keys, market):
             close = float(raw_close)
         except ValueError:
             continue                       # 無成交（如 "--"）跳過
+        raw_chg = _pick(d, *change_keys).replace(",", "").replace("+", "")
+        try:
+            change = float(raw_chg)
+        except ValueError:
+            change = ""                    # 漲跌缺值時留空，不影響收盤
         name = _pick(d, *name_keys)
-        rows.append([tk, name, close, market])
+        rows.append([tk, name, close, change, market])
     return rows
 
 
@@ -226,6 +231,7 @@ def fetch_prices_all():
             code_keys=["Code", "code"],
             name_keys=["Name", "name"],
             close_keys=["ClosingPrice", "Close", "close"],
+            change_keys=["Change", "change"],
             market="TWSE")
         all_rows += rows
         notes.append(f"上市 {len(rows)} 檔")
@@ -240,6 +246,7 @@ def fetch_prices_all():
             code_keys=["SecuritiesCompanyCode", "Code", "code", "股票代號"],
             name_keys=["CompanyName", "Name", "name", "名稱"],
             close_keys=["Close", "ClosingPrice", "close", "收盤"],
+            change_keys=["Change", "change", "漲跌", "漲跌價差"],
             market="TPEx")
         all_rows += rows
         notes.append(f"上櫃 {len(rows)} 檔")
@@ -249,10 +256,10 @@ def fetch_prices_all():
     if not all_rows:
         raise RuntimeError("上市與上櫃皆抓取失敗：" + "；".join(notes))
 
-    out = pd.DataFrame(all_rows, columns=["ticker", "name", "close", "market"])
+    out = pd.DataFrame(all_rows, columns=["ticker", "name", "close", "change", "market"])
     out = out.drop_duplicates(subset="ticker", keep="first").reset_index(drop=True)
     out["date"] = today_iso
-    return out[["ticker", "name", "close", "market", "date"]], notes
+    return out[["ticker", "name", "close", "change", "market", "date"]], notes
 
 
 def run_prices():
@@ -260,8 +267,8 @@ def run_prices():
     mock = os.environ.get("MOCK_PRICE_JSON")
     if mock:
         arr = _json.load(open(mock, encoding="utf-8"))
-        rows = _parse_close_rows(arr, ["Code"], ["Name"], ["ClosingPrice"], "TWSE")
-        out = pd.DataFrame(rows, columns=["ticker", "name", "close", "market"])
+        rows = _parse_close_rows(arr, ["Code"], ["Name"], ["ClosingPrice"], ["Change"], "TWSE")
+        out = pd.DataFrame(rows, columns=["ticker", "name", "close", "change", "market"])
         out["date"] = dt.date.today().isoformat()
         notes = [f"mock {len(rows)} 檔"]
     else:
