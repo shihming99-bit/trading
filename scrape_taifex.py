@@ -21,8 +21,9 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 URL_OI = "https://stock.wearn.com/taifexphoto.asp"       # k 省略＝台指期
 CSV_OI = os.path.join(DATA_DIR, "taifex_oi.csv")
 
-# 三大法人現貨買賣超（億元）
-URL_FUND = "https://stock.wearn.com/fundthree.asp"
+# 三大法人現貨買賣超（億元）— 改用證交所官方 BFI82U（與官網統計表一致）
+# 說明：官方一天產製兩次（14:50 不含綜合帳戶/鉅額、19:40 含），排程設晚一點抓到含鉅額的確定版
+URL_FUND = "https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json&type=day"
 CSV_FUND = os.path.join(DATA_DIR, "fund_netbuy.csv")
 
 # 全市場收盤價（每日覆蓋，不累積歷史）— 官方即時端點（盤後約16:00更新）
@@ -117,51 +118,68 @@ def normalize_oi(t: pd.DataFrame) -> pd.DataFrame:
     return body[["date"] + COLS].reset_index(drop=True)
 
 
-# ---------- 三大法人現貨買賣超（億元）----------
-FUND_COLS = ["date_roc", "trust", "dealer", "foreign"]   # 對應 wearn 欄序：投信/自營商/外資
+# ---------- 三大法人現貨買賣超（億元）— 證交所官方 BFI82U ----------
+FUND_COLS = ["date_roc", "trust", "dealer", "foreign"]   # 投信/自營商(合計)/外資
 
 
-def _num(x):
-    x = str(x).replace(",", "").replace(" ", "")
-    if x in ("", "nan"):
-        return None
-    return float(x)
+def _yi(n):
+    """元 → 億元，四捨五入到小數兩位。"""
+    return round(n / 1e8, 2)
 
 
-def pick_fund_table(tables):
-    """含日期、投信、外資三者的那張明細表（非上方統計小表）。"""
-    for t in tables:
-        s = t.astype(str)
-        joined = " ".join(str(v) for v in s.head(3).values.ravel())
-        if "日期" in joined and "投信" in joined and "外資" in joined:
-            return t
-    raise RuntimeError("找不到三大法人買賣超表，wearn 版面可能已改動。")
+def run_fund():
+    """抓官方 BFI82U，合併進 fund_netbuy.csv。自營商=自行買賣+避險；外資=外資及陸資(不含外資自營商)。"""
+    mock = os.environ.get("MOCK_FUND_JSON")
+    payload = (_json.load(open(mock, encoding="utf-8")) if mock
+               else _fetch_json(URL_FUND))
+    tables = payload.get("tables") or ([payload] if "data" in payload else [])
+    # BFI82U 只有一張表；相容處理
+    t = None
+    for cand in tables:
+        title = str(cand.get("title", ""))
+        fields = " ".join(str(x) for x in cand.get("fields", []))
+        if "買賣差額" in fields or "買賣差額" in title or "三大法人" in title:
+            t = cand
+            break
+    if t is None and tables:
+        t = tables[0]
+    if t is None:
+        raise RuntimeError("BFI82U 找不到資料表")
 
+    iso = _roc_title_to_iso(t.get("title", ""))
+    roc = ""
+    m = _re.search(r"(\d{2,3})年(\d{1,2})月(\d{1,2})日", str(t.get("title", "")))
+    if m:
+        roc = f"{int(m.group(1)):03d}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
 
-def normalize_fund(t: pd.DataFrame) -> pd.DataFrame:
-    df = t.astype(str)
-    hi = header_row_index(df)
-    header = df.iloc[hi].tolist()
+    # 各類別買賣差額（第 4 欄，index 3），單位:元
+    diff = {}
+    for r in t.get("data", []):
+        name = str(r[0]).strip()
+        try:
+            diff[name] = float(str(r[3]).replace(",", "").strip())
+        except (ValueError, IndexError):
+            continue
 
-    def col_for(key):                       # 依欄名定位，不靠固定位置
-        for j, name in enumerate(header):
-            if key in name:
-                return j
-        raise RuntimeError(f"買賣超表缺少欄位：{key}")
+    def get(*keys):
+        for k in keys:
+            for name, v in diff.items():
+                if k in name:
+                    return v
+        return 0.0
 
-    c_trust, c_dealer, c_foreign = col_for("投信"), col_for("自營商"), col_for("外資")
-    body = df.iloc[hi + 1:]
-    body = body[body.iloc[:, 0].str.match(r"^\d{3}/\d{2}/\d{2}$", na=False)]
-    if body.empty:
-        raise RuntimeError("買賣超表解析後沒有有效資料列。")
+    trust = _yi(get("投信"))
+    dealer = _yi(get("自營商(自行買賣)", "自行買賣") + get("自營商(避險)", "避險"))
+    foreign = _yi(get("外資及陸資"))
 
-    rows = []
-    for _, r in body.iterrows():
-        rows.append([r.iloc[0], _num(r.iloc[c_trust]),
-                     _num(r.iloc[c_dealer]), _num(r.iloc[c_foreign])])
-    out = pd.DataFrame(rows, columns=FUND_COLS)
-    out["date"] = out["date_roc"].map(roc_to_iso)
-    return out[["date"] + FUND_COLS].reset_index(drop=True)
+    new = pd.DataFrame([[roc, trust, dealer, foreign]], columns=FUND_COLS)
+    new["date"] = iso or dt.date.today().isoformat()
+    new = new[["date"] + FUND_COLS]
+
+    total, added = merge_csv(new, CSV_FUND)
+    print(f"[{dt.datetime.now():%Y-%m-%d %H:%M}] 買賣超：交易日 {new['date'].iloc[0]}"
+          f"（投信 {trust}、自營商 {dealer}、外資 {foreign} 億）；"
+          f"CSV 現有 {total} 列，本次淨增 {added} 列。")
 
 
 # ---------- 全市場收盤價（官方 API，每日覆蓋）----------
@@ -381,16 +399,18 @@ def run_one(label, url, mock_env, picker, normalizer, csv_path):
 
 def main():
     errors = []
-    # 三份資料彼此獨立：其中一份失敗不影響其他
-    for args in [
-        ("未平倉", URL_OI, "MOCK_HTML", pick_oi_table, normalize_oi, CSV_OI),
-        ("買賣超", URL_FUND, "MOCK_FUND", pick_fund_table, normalize_fund, CSV_FUND),
-    ]:
-        try:
-            run_one(*args)
-        except Exception as e:
-            errors.append(f"{args[0]}：{e}")
-            print(f"  ⚠ {args[0]} 抓取失敗：{e}", file=sys.stderr)
+    # 未平倉仍用 wearn HTML；買賣超、收盤價改用證交所官方 API。三份彼此獨立。
+    try:
+        run_one("未平倉", URL_OI, "MOCK_HTML", pick_oi_table, normalize_oi, CSV_OI)
+    except Exception as e:
+        errors.append(f"未平倉：{e}")
+        print(f"  ⚠ 未平倉抓取失敗：{e}", file=sys.stderr)
+    # 三大法人買賣超（官方 BFI82U）
+    try:
+        run_fund()
+    except Exception as e:
+        errors.append(f"買賣超：{e}")
+        print(f"  ⚠ 買賣超抓取失敗：{e}", file=sys.stderr)
     # 全市場收盤價（覆蓋式，獨立處理）
     try:
         run_prices()
