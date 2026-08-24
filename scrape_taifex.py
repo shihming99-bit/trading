@@ -29,6 +29,9 @@ CSV_FUND = os.path.join(DATA_DIR, "fund_netbuy.csv")
 # 全市場收盤價（每日覆蓋，不累積歷史）— 官方即時端點（盤後約16:00更新）
 # 證交所 MI_INDEX：多表 JSON，個股收盤在「每日收盤行情」表；type=ALLBUT0999 為全部（不含權證等）
 URL_PRICE_TWSE = "https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&type=ALLBUT0999"
+# 大盤整體融資融券餘額（信用交易統計）— 證交所官方 MI_MARGN
+URL_MARGIN = "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&selectType=MS"
+CSV_MARGIN = os.path.join(DATA_DIR, "margin.csv")
 # 櫃買中心（上櫃）每日收盤行情
 URL_PRICE_TPEX = "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes?response=json"
 CSV_PRICE = os.path.join(DATA_DIR, "prices.csv")
@@ -179,6 +182,73 @@ def run_fund():
     total, added = merge_csv(new, CSV_FUND)
     print(f"[{dt.datetime.now():%Y-%m-%d %H:%M}] 買賣超：交易日 {new['date'].iloc[0]}"
           f"（投信 {trust}、自營商 {dealer}、外資 {foreign} 億）；"
+          f"CSV 現有 {total} 列，本次淨增 {added} 列。")
+
+
+# ---------- 大盤融資融券餘額 — 證交所官方 MI_MARGN ----------
+MARGIN_COLS = ["date_roc", "margin_bal", "short_bal"]  # 融資餘額(億)、融券餘額(張)
+
+
+def run_margin():
+    """抓 MI_MARGN 信用交易統計表，取大盤融資餘額(億元)與融券餘額(張)。"""
+    mock = os.environ.get("MOCK_MARGIN_JSON")
+    payload = (_json.load(open(mock, encoding="utf-8")) if mock
+               else _fetch_json(URL_MARGIN))
+    tables = payload.get("tables") or ([payload] if "data" in payload else [])
+    t = None
+    for cand in tables:
+        title = str(cand.get("title", ""))
+        fields = " ".join(str(x) for x in cand.get("fields", []))
+        if "信用交易統計" in title or "今日餘額" in fields:
+            t = cand
+            break
+    if t is None and tables:
+        t = tables[0]
+    if t is None:
+        raise RuntimeError("MI_MARGN 找不到信用交易統計表")
+
+    iso = _roc_title_to_iso(t.get("title", ""))
+    roc = ""
+    m = _re.search(r"(\d{2,3})年(\d{1,2})月(\d{1,2})日", str(t.get("title", "")))
+    if m:
+        roc = f"{int(m.group(1)):03d}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+
+    fields = t.get("fields", [])
+    c_today = None
+    for i, f in enumerate(fields):
+        if "今日餘額" in str(f):
+            c_today = i
+            break
+    if c_today is None:
+        c_today = -1   # 最後一欄通常是今日餘額
+
+    def find_row(key):
+        for r in t.get("data", []):
+            if key in str(r[0]):
+                return r
+        return None
+
+    def cell_num(r):
+        if r is None:
+            return None
+        try:
+            return float(str(r[c_today]).replace(",", "").strip())
+        except (ValueError, IndexError):
+            return None
+
+    # 融資金額(仟元) → 億元；融券(交易單位=張)
+    margin_amt = cell_num(find_row("融資金額"))       # 仟元
+    short_unit = cell_num(find_row("融券(交易單位)"))  # 張
+    margin_bal = round(margin_amt / 1e5, 2) if margin_amt is not None else None  # 仟元→億元
+    short_bal = int(short_unit) if short_unit is not None else None
+
+    new = pd.DataFrame([[roc, margin_bal, short_bal]], columns=MARGIN_COLS)
+    new["date"] = iso or dt.date.today().isoformat()
+    new = new[["date"] + MARGIN_COLS]
+
+    total, added = merge_csv(new, CSV_MARGIN)
+    print(f"[{dt.datetime.now():%Y-%m-%d %H:%M}] 融資券：交易日 {new['date'].iloc[0]}"
+          f"（融資餘額 {margin_bal} 億、融券 {short_bal} 張）；"
           f"CSV 現有 {total} 列，本次淨增 {added} 列。")
 
 
@@ -411,6 +481,12 @@ def main():
     except Exception as e:
         errors.append(f"買賣超：{e}")
         print(f"  ⚠ 買賣超抓取失敗：{e}", file=sys.stderr)
+    # 大盤融資融券餘額（官方 MI_MARGN）
+    try:
+        run_margin()
+    except Exception as e:
+        errors.append(f"融資券：{e}")
+        print(f"  ⚠ 融資券抓取失敗：{e}", file=sys.stderr)
     # 全市場收盤價（覆蓋式，獨立處理）
     try:
         run_prices()
