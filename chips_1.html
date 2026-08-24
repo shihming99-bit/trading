@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台指期三大法人未平倉 · 自動追蹤儀表板</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root{
+    --ink:#12161c; --paper:#f6f4ef; --panel:#fffdf9;
+    --line:#d9d3c7; --muted:#6d6b64;
+    --foreign:#c0392b; --trust:#1f6f6b; --dealer:#c98a1e; --price:#2b2f36;
+    --grid:#e7e2d8; --accent:#3b5b7a; --ok:#1f6f6b; --warn:#b06a1e;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--paper);color:var(--ink);
+    font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;line-height:1.5;padding:32px 20px 64px;
+  }
+  .wrap{max-width:1040px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.22em;color:var(--muted);text-transform:uppercase;margin-bottom:10px}
+  h1{font-size:clamp(26px,4vw,38px);font-weight:800;letter-spacing:-.01em;line-height:1.12}
+  .sub{color:var(--muted);margin-top:8px;font-size:14px}
+  /* data source bar */
+  .source{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:18px 0 4px;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .source .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+  .source .dot.ok{background:var(--ok)} .source .dot.err{background:var(--foreign)} .source .dot.load{background:var(--warn)}
+  .source .st{font-size:13px;color:var(--ink);flex:1;min-width:180px}
+  .source .st b{font-variant-numeric:tabular-nums}
+  .source button{font:inherit;font-size:12.5px;font-weight:600;padding:7px 14px;border-radius:9px;cursor:pointer;
+    border:1px solid var(--ink);background:var(--ink);color:var(--paper)}
+  .source button.ghost{background:transparent;color:var(--ink)}
+  .asof{display:inline-block;margin:12px 0 0;font-size:12px;color:var(--muted);
+    border:1px solid var(--line);border-radius:999px;padding:4px 12px;background:var(--panel)}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0 12px}
+  @media(max-width:720px){.cards{grid-template-columns:repeat(2,1fr)}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 16px 14px}
+  .card .k{font-size:11px;letter-spacing:.14em;color:var(--muted);text-transform:uppercase}
+  .card .v{font-size:26px;font-weight:800;margin-top:6px;font-variant-numeric:tabular-nums}
+  .card .d{font-size:12px;margin-top:4px;font-variant-numeric:tabular-nums}
+  .up{color:var(--foreign)} .dn{color:var(--trust)}
+  .statgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+  @media(max-width:720px){.statgrid{grid-template-columns:repeat(2,1fr)}}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .stat .k{font-size:11px;color:var(--muted);letter-spacing:.06em}
+  .stat .v{font-size:20px;font-weight:700;margin-top:5px;font-variant-numeric:tabular-nums}
+  .stat .n{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.45}
+  .bar{height:6px;border-radius:3px;background:var(--grid);margin-top:8px;overflow:hidden}
+  .bar > i{display:block;height:100%;background:var(--foreign)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px 20px 12px;margin-bottom:20px}
+  .panel h2{font-size:15px;font-weight:700;letter-spacing:.02em}
+  .panel .note{font-size:12px;color:var(--muted);margin-top:2px}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin:14px 0 8px}
+  .lg{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink)}
+  .sw{width:22px;height:3px;border-radius:2px;display:inline-block}
+  .chart-box{position:relative;height:340px}
+  .chart-box.small{height:300px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;margin-top:6px}
+  th,td{padding:7px 8px;text-align:right;border-bottom:1px solid var(--grid)}
+  th:first-child,td:first-child{text-align:left}
+  thead th{color:var(--muted);font-weight:600;letter-spacing:.03em;border-bottom:1px solid var(--line)}
+  tbody tr:hover{background:#f0ece2}
+  .neg{color:var(--foreign)} .pos{color:var(--trust)}
+  .foot{font-size:11.5px;color:var(--muted);margin-top:18px;line-height:1.7}
+  .toggle{display:flex;gap:6px;margin:2px 0 4px;flex-wrap:wrap}
+  .toggle button{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--panel);
+    color:var(--muted);padding:5px 12px;border-radius:999px;cursor:pointer;transition:.15s}
+  .toggle button.on{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+  details.cfg{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin:10px 0 0;overflow:hidden}
+  details.cfg > summary{cursor:pointer;padding:12px 14px;font-size:13px;font-weight:600;list-style:none;
+    display:flex;align-items:center;gap:8px;user-select:none;color:var(--muted)}
+  details.cfg > summary::-webkit-details-marker{display:none}
+  .cfgbody{padding:0 14px 14px}
+  .cfgbody p{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.6}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+  input[type=text]{flex:1;min-width:240px;border:1px solid var(--line);border-radius:9px;padding:8px 11px;
+    font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#fffef9;color:var(--ink)}
+  textarea{width:100%;height:110px;border:1px solid var(--line);border-radius:9px;padding:10px 12px;
+    font-family:ui-monospace,Menlo,monospace;font-size:12px;resize:vertical;background:#fffef9;color:var(--ink)}
+  .msg{font-size:12px;color:var(--accent)}
+  code{background:#efe9dc;padding:1px 5px;border-radius:4px;font-size:11.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">台指期 · 三大法人未平倉</div>
+  <h1>外資、投信、自營商<br>台指期近月未平倉淨額</h1>
+  <p class="sub">籌碼方向追蹤 · 資料自 GitHub 上的 <code>taifex_oi.csv</code> 自動載入（每日盤後由排程更新）</p>
+
+  <div class="source">
+    <span class="dot load" id="srcDot"></span>
+    <span class="st" id="srcStatus">正在載入資料…</span>
+    <button id="reloadBtn">重新載入</button>
+  </div>
+
+  <details class="cfg">
+    <summary>資料來源設定 / 手動更新</summary>
+    <div class="cfgbody">
+      <p>自動載入的 CSV 網址（預設指向你的 <code>shihming99-bit/trading</code> repo。
+        <b>repo 需為 public 才能自動讀取</b>；若維持 private，請改用下方手動貼上）。</p>
+      <div class="row">
+        <input type="text" id="csvUrl">
+        <button id="fetchUrlBtn">從網址載入</button>
+      </div>
+      <p style="margin-top:10px">或直接貼上 wearn 表格（維持 private 時用這個）。欄位順序：
+        日期　前五大　前十大　前五特法　前十特法　外資　投信　自營商　收盤。</p>
+      <textarea id="pasteBox" placeholder="115/08/21  18500  6200  18500  3900  -80100  76200  1800  45200"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="mergeBtn">貼上並合併</button>
+        <button class="ghost" id="clearBtn">清空</button>
+        <span class="msg" id="msg"></span>
+      </div>
+    </div>
+  </details>
+
+  <div class="asof" id="asof"></div>
+
+  <div class="cards" id="cards"></div>
+  <div class="statgrid" id="stats"></div>
+
+  <div class="panel">
+    <h2>未平倉淨額走勢（口數）</h2>
+    <div class="note">正值＝淨多單，負值＝淨空單。外資長期維持大額淨空單，多為現貨避險部位，需與現貨買賣超合看。</div>
+    <div class="legend">
+      <span class="lg"><i class="sw" style="background:var(--foreign)"></i>外資</span>
+      <span class="lg"><i class="sw" style="background:var(--trust)"></i>投信</span>
+      <span class="lg"><i class="sw" style="background:var(--dealer)"></i>自營商</span>
+    </div>
+    <div class="chart-box"><canvas id="oiChart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>外資未平倉淨額 vs 加權收盤</h2>
+    <div class="note">觀察外資淨空單增減與指數的對應。虛線為外資淨額5日均。</div>
+    <div class="chart-box small"><canvas id="fxChart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>三大法人現貨買賣超（億元）</h2>
+    <div class="note">現貨市場實際買賣力道。正值買超、負值賣超；不含盤後大額交易。與上方期貨部位合看：外資現貨買超、期貨卻加空單，多為避險而非看空。</div>
+    <div class="legend">
+      <span class="lg"><i class="sw" style="background:var(--foreign)"></i>外資</span>
+      <span class="lg"><i class="sw" style="background:var(--trust)"></i>投信</span>
+      <span class="lg"><i class="sw" style="background:var(--dealer)"></i>自營商</span>
+    </div>
+    <div class="chart-box"><canvas id="fundChart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>外資：現貨買賣超 vs 期貨未平倉淨額</h2>
+    <div class="note">同一天外資在現貨買賣（長條，億元）與期貨部位（線，口數）的對照，看兩邊方向是否一致。</div>
+    <div class="chart-box small"><canvas id="xfxChart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>大盤融資餘額（億元）</h2>
+    <div class="note">散戶槓桿多空情緒指標。融資餘額增加＝散戶加碼作多、市場偏熱；快速下降常見於去槓桿或急跌。可與加權收盤對照看背離。</div>
+    <div class="chart-box small"><canvas id="marginChart"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>近期資料</h2>
+    <div class="toggle" id="rangeToggle">
+      <button data-n="10" class="on">近 10 日</button>
+      <button data-n="20">近 20 日</button>
+      <button data-n="9999">全部</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table id="tbl">
+        <thead><tr><th>日期</th><th>外資</th><th>Δ外資</th><th>投信</th><th>自營商</th><th>前五大</th><th>收盤</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <p class="foot">
+    自動載入依賴 CSV 公開可讀；GitHub raw 有數分鐘快取，剛更新的資料可能需稍候或按重新載入。<br>
+    資料及內容僅供參考，不構成投資建議，投資請獨立判斷並自負風險。
+  </p>
+</div>
+
+<script>
+// ---- 預設 CSV 網址（你的 repo）----
+const REPO_RAW = "https://raw.githubusercontent.com/shihming99-bit/trading/main/data/";
+const DEFAULT_URL  = REPO_RAW + "taifex_oi.csv";     // 期貨未平倉
+const DEFAULT_FUND = REPO_RAW + "fund_netbuy.csv";   // 現貨買賣超
+const DEFAULT_MARGIN = REPO_RAW + "margin.csv";      // 大盤融資餘額
+
+// 融資餘額（億元）：[date_roc, margin_bal] — 種子備援（僅示意，會被自動載入覆蓋）
+let margin = [["115/08/21",2165.36]];
+
+// 現貨買賣超資料（億元）：[date_roc, trust, dealer, foreign] — 種子備援
+let fund = [
+["115/08/20",-12.11,-61.08,37.82],["115/08/19",-120.91,-171.18,-416.39],
+["115/08/18",56.63,-176.07,-119.86],["115/08/17",-177.47,14.05,454.47],
+["115/08/14",71.96,-16.61,453.51],["115/08/13",0.01,150.61,756.95],
+["115/08/12",28.01,87.01,110.21],["115/08/11",33.90,24.60,223.29],
+["115/08/10",29.84,184.68,517.15],["115/08/07",-25.60,-9.68,-407.16],
+["115/08/06",88.56,-63.13,20.20],["115/08/05",86.41,14.57,903.08],
+["115/08/04",252.70,-194.29,-57.32],["115/08/03",210.68,-206.53,-191.91],
+["115/07/31",333.82,-162.60,675.54],["115/07/30",126.65,-152.27,-483.12],
+["115/07/29",90.94,-185.99,-222.52],["115/07/28",23.53,-317.30,-875.63],
+["115/07/27",-2.79,-78.57,80.40],["115/07/24",57.08,-111.51,-609.50],
+["115/07/23",53.37,41.94,69.58],["115/07/22",169.92,-23.98,173.44],
+["115/07/21",172.32,35.07,-43.32],["115/07/20",146.49,-80.64,-60.84],
+["115/07/17",95.03,-821.79,-1890.39],["115/07/16",85.49,-33.58,-483.35],
+["115/07/15",114.81,101.26,-14.15],["115/07/14",148.24,-382.91,-518.93],
+["115/07/13",96.09,-110.98,-195.77],["115/07/09",154.10,-76.71,-471.33],
+["115/07/08",119.61,-169.43,-379.49],["115/07/07",87.73,-487.33,-547.31],
+["115/07/06",69.08,-97.21,-255.04],["115/07/03",75.96,-32.60,-777.83],
+["115/07/02",91.19,-43.28,-890.47],["115/07/01",146.21,59.38,323.76],
+["115/06/30",7.56,145.85,-5.09],["115/06/29",137.54,-45.93,-60.11],
+["115/06/26",83.95,-707.34,-1431.89],["115/06/25",161.41,-70.01,-405.10],
+];
+
+// 內部資料 raw：[date_roc, top5, top10, top5_sp, top10_sp, foreign, trust, dealer, close]
+// 種子資料（自動載入失敗時的備援，讓儀表板永遠有東西可看）
+let raw = [
+["115/08/20",20132,7315,20132,4422,-82423,75825,2019,44868],
+["115/08/19",18023,5933,18023,3074,-81501,74789,2562,44612],
+["115/08/18",-291,-1873,-291,-2463,-83078,76112,2566,45085],
+["115/08/17",6392,-1578,6392,-2907,-83474,78013,1021,45888],
+["115/08/14",11078,696,11078,-133,-85179,80335,1464,45841],
+["115/08/13",13524,1702,13524,1702,-86249,82327,472,46005],
+["115/08/12",15753,2549,15753,1842,-86633,82383,1239,45528],
+["115/08/11",15966,3557,15966,3557,-88924,83418,1899,45090],
+["115/08/10",16886,4520,16886,4520,-89201,83751,1679,44987],
+["115/08/07",17975,6077,17975,5036,-87911,83077,2512,44349],
+["115/08/06",18080,5766,18080,5766,-89383,84163,2602,44280],
+["115/08/05",19403,6110,19403,6110,-87199,84575,1311,44514],
+["115/08/04",17200,4161,17200,4161,-87858,82548,2356,43357],
+["115/08/03",16194,2359,16194,2359,-90038,83900,718,43230],
+["115/07/31",23999,12175,23999,12175,-82515,85325,-2377,43678],
+["115/07/30",18076,4783,18076,3337,-81017,75857,1996,40270],
+["115/07/29",15729,3243,15729,-686,-82785,74742,2552,40392],
+["115/07/28",18157,5475,18157,2056,-82255,74886,2588,41613],
+["115/07/27",20769,8825,20769,6168,-78699,74111,1891,43907],
+["115/07/24",22600,10957,22600,9435,-76260,73838,2258,43905],
+["115/07/23",22547,10778,22547,9707,-75198,75492,739,44930],
+["115/07/22",20806,8898,20806,6671,-76595,75623,1139,44631],
+["115/07/21",20283,8489,20283,6871,-78490,75570,1203,44377],
+["115/07/20",15366,4738,15366,2250,-78337,72446,2974,42641],
+["115/07/17",11816,549,8755,-2512,-86189,75215,4666,42725],
+["115/07/16",12706,3426,12706,1591,-84453,76264,657,45700],
+["115/07/15",15358,6182,15358,6182,-79557,75646,-664,45830],
+["115/07/14",-945,-2991,-2982,-4058,-83390,73873,2352,44815],
+["115/07/13",-2562,-4408,-4638,-6484,-81066,71794,1270,45617],
+["115/07/09",7286,-272,7286,-59,-80730,71689,2243,45678],
+["115/07/08",9577,-431,6914,-3094,-81268,69987,3311,45564],
+["115/07/07",8476,-1696,5848,-4324,-80042,68187,3793,45775],
+["115/07/06",8581,-2774,5952,-5402,-80087,67254,2670,46886],
+["115/07/03",7567,-3680,4733,-6515,-81052,67213,3071,46966],
+["115/07/02",6598,-3972,2900,-10756,-84487,66410,3683,46599],
+["115/07/01",7497,-5540,2273,-12677,-84168,67194,1592,47231],
+["115/06/30",9082,-3592,3653,-10760,-83063,66623,1571,46730],
+["115/06/29",6597,-4019,2851,-9562,-76627,62962,2415,45550],
+["115/06/26",5277,-4666,2321,-10365,-76391,61247,4641,44373],
+["115/06/25",1457,-10420,-1432,-17631,-81051,60921,3003,46544],
+["115/06/24",-1576,-13224,-4577,-19187,-83605,60757,3277,46387],
+["115/06/23",-1751,-9943,-1751,-14975,-76502,60180,930,47436],
+["115/06/22",1212,-5851,1212,-7492,-70290,61196,-563,48413],
+["115/06/18",-206,-6239,-206,-8194,-68337,58597,63,46769],
+["115/06/17",683,-6431,683,-9792,-67394,57083,72,45668],
+["115/06/16",4086,2224,-1278,-2382,-69847,56894,2219,45772],
+["115/06/15",5827,1500,-1944,-2307,-66734,57702,2618,45580],
+["115/06/12",5189,704,831,-1691,-65039,57111,3568,44188],
+["115/06/11",4828,494,569,-1910,-63168,55312,4155,43241],
+["115/06/10",5505,1202,1781,-942,-61949,54186,4853,43422],
+];
+
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const sign = n => (n>0?'+':'') + fmt(n);
+const css = v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function dkey(d){const[y,m,day]=d.split('/').map(Number);return y*10000+m*100+day;}
+function sortDesc(){raw.sort((a,b)=>dkey(b[0])-dkey(a[0]));}
+function movingAvg(arr,w){return arr.map((_,i)=>{const s=Math.max(0,i-w+1);const sl=arr.slice(s,i+1);return sl.reduce((a,b)=>a+b,0)/sl.length;});}
+function pearson(x,y){const n=x.length;if(n<2)return NaN;const mx=x.reduce((a,b)=>a+b,0)/n,my=y.reduce((a,b)=>a+b,0)/n;let sxy=0,sxx=0,syy=0;for(let i=0;i<n;i++){const dx=x[i]-mx,dy=y[i]-my;sxy+=dx*dy;sxx+=dx*dx;syy+=dy*dy;}return sxy/Math.sqrt(sxx*syy);}
+function percentileOf(arr,v){return arr.filter(a=>a<=v).length/arr.length*100;}
+
+// ---- CSV 解析（依欄名對應，容忍欄位順序變動）----
+function parseCSV(text){
+  const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
+  if(lines.length<2) throw new Error("CSV 無資料列");
+  const head=lines[0].split(',').map(s=>s.trim());
+  const idx=name=>head.indexOf(name);
+  const iRoc=idx('date_roc'), iF=idx('foreign'), iT=idx('trust'),
+        iD=idx('dealer'), iC=idx('close'), i5=idx('top5'),
+        i10=idx('top10'), i5s=idx('top5_sp'), i10s=idx('top10_sp'), iDate=idx('date');
+  if(iF<0||iC<0||(iRoc<0&&iDate<0)) throw new Error("CSV 欄位不符（缺 foreign/close/date）");
+  const out=[];
+  for(let r=1;r<lines.length;r++){
+    const c=lines[r].split(',');
+    const num=i=>i>=0?Number((c[i]||'').replace(/,/g,'')):0;
+    let roc = iRoc>=0? (c[iRoc]||'').trim() : '';
+    if(!roc && iDate>=0){ // 由西元回推民國
+      const[y,m,d]=(c[iDate]||'').trim().split('-');
+      if(y) roc=`${(+y-1911)}/${m}/${d}`;
+    }
+    if(!/^\d{3}\/\d{2}\/\d{2}$/.test(roc)) continue;
+    out.push([roc,num(i5),num(i10),num(i5s),num(i10s),num(iF),num(iT),num(iD),num(iC)]);
+  }
+  if(!out.length) throw new Error("CSV 解析後無有效列");
+  return out;
+}
+
+function parseFundCSV(text){
+  const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
+  if(lines.length<2) throw new Error("買賣超 CSV 無資料列");
+  const head=lines[0].split(',').map(s=>s.trim());
+  const idx=n=>head.indexOf(n);
+  const iRoc=idx('date_roc'),iDate=idx('date'),iT=idx('trust'),iD=idx('dealer'),iF=idx('foreign');
+  if(iT<0||iD<0||iF<0||(iRoc<0&&iDate<0)) throw new Error("買賣超 CSV 欄位不符");
+  const out=[];
+  for(let r=1;r<lines.length;r++){
+    const c=lines[r].split(',');
+    const num=i=>i>=0?Number((c[i]||'').replace(/,/g,'')):0;
+    let roc=iRoc>=0?(c[iRoc]||'').trim():'';
+    if(!roc&&iDate>=0){const[y,m,d]=(c[iDate]||'').trim().split('-');if(y)roc=`${(+y-1911)}/${m}/${d}`;}
+    if(!/^\d{3}\/\d{2}\/\d{2}$/.test(roc)) continue;
+    out.push([roc,num(iT),num(iD),num(iF)]);
+  }
+  if(!out.length) throw new Error("買賣超 CSV 解析後無有效列");
+  return out;
+}
+
+function parseMarginCSV(text){
+  const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
+  if(lines.length<2) throw new Error("融資 CSV 無資料列");
+  const head=lines[0].split(',').map(s=>s.trim());
+  const idx=n=>head.indexOf(n);
+  const iRoc=idx('date_roc'),iDate=idx('date'),iM=idx('margin_bal');
+  if(iM<0||(iRoc<0&&iDate<0)) throw new Error("融資 CSV 欄位不符");
+  const out=[];
+  for(let r=1;r<lines.length;r++){
+    const c=lines[r].split(',');
+    let roc=iRoc>=0?(c[iRoc]||'').trim():'';
+    if(!roc&&iDate>=0){const[y,m,d]=(c[iDate]||'').trim().split('-');if(y)roc=`${(+y-1911)}/${m}/${d}`;}
+    if(!/^\d{3}\/\d{2}\/\d{2}$/.test(roc)) continue;
+    const v=Number((c[iM]||'').replace(/,/g,''));
+    if(!Number.isFinite(v)) continue;
+    out.push([roc,v]);
+  }
+  if(!out.length) throw new Error("融資 CSV 解析後無有效列");
+  return out;
+}
+
+function setStatus(kind,text){
+  const dot=document.getElementById('srcDot'), st=document.getElementById('srcStatus');
+  dot.className='dot '+(kind==='ok'?'ok':kind==='err'?'err':'load');
+  st.innerHTML=text;
+}
+
+async function fetchText(url){
+  const bust=(url.includes('?')?'&':'?')+'_='+Date.now();
+  const res=await fetch(url+bust,{cache:'no-store'});
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  return res.text();
+}
+
+async function autoload(oiUrl){
+  setStatus('load','正在載入資料…');
+  // 由未平倉網址推導買賣超網址（同目錄）
+  const fundUrl = oiUrl.replace(/taifex_oi\.csv.*$/, 'fund_netbuy.csv');
+  const marginUrl = oiUrl.replace(/taifex_oi\.csv.*$/, 'margin.csv');
+  let oiOK=false, fundOK=false, err='';
+  try{ raw = parseCSV(await fetchText(oiUrl)); oiOK=true; }
+  catch(e){ err='未平倉 '+e.message; }
+  try{ fund = parseFundCSV(await fetchText(fundUrl)); fundOK=true; }
+  catch(e){ err+=(err?'；':'')+'買賣超 '+e.message; }
+  try{ margin = parseMarginCSV(await fetchText(marginUrl)); }
+  catch(e){ /* 融資餘額為選配，失敗不影響主資料 */ }
+
+  render();
+  if(oiOK && fundOK){
+    const latest=raw.slice().sort((a,b)=>dkey(b[0])-dkey(a[0]))[0][0];
+    setStatus('ok',`已自動載入 · 未平倉 <b>${raw.length}</b> 筆、買賣超 <b>${fund.length}</b> 筆 · 最新 <b>${latest}</b>`);
+  }else if(oiOK||fundOK){
+    setStatus('load',`部分載入成功（${oiOK?'未平倉':'買賣超'}）。另一份失敗：${err}。`);
+  }else{
+    setStatus('err',
+      `自動載入失敗（${err}）。若 repo 為 private 請改用手動貼上；若已改 public，稍候再按重新載入。目前為內建種子資料。`);
+  }
+}
+
+// ---- 手動貼上 wearn 表格 ----
+function parsePaste(txt){
+  const out=[]; let bad=0;
+  txt.split(/\r?\n/).forEach(line=>{
+    line=line.trim(); if(!line)return;
+    const parts=line.replace(/^\||\|$/g,'').split(/[\|\t]|\s+/).map(s=>s.trim()).filter(Boolean);
+    if(!/^\d{3}\/\d{2}\/\d{2}$/.test(parts[0])){bad++;return;}
+    const nums=parts.slice(1).map(s=>Number(s.replace(/,/g,'')));
+    if(nums.length<8||nums.some(isNaN)){bad++;return;}
+    out.push([parts[0],...nums.slice(0,8)]);
+  });
+  return {out,bad};
+}
+function mergeData(newRows){
+  const map=new Map(); raw.forEach(r=>map.set(r[0],r));
+  let added=0,updated=0;
+  newRows.forEach(r=>{ if(map.has(r[0]))updated++; else added++; map.set(r[0],r); });
+  raw=[...map.values()]; return {added,updated};
+}
+
+let oiChart,fxChart,tableN=10;
+function render(){
+  sortDesc();
+  const rows=raw.slice().reverse();
+  const labels=rows.map(r=>r[0].slice(4));
+  const foreign=rows.map(r=>r[5]),trust=rows.map(r=>r[6]),dealer=rows.map(r=>r[7]),close=rows.map(r=>r[8]);
+  const L=rows.length-1, fMA5=movingAvg(foreign,5);
+  const dl=a=>a[L]-a[L-1];
+  const cardData=[
+    {k:'外資淨額',v:foreign[L],d:dl(foreign),col:'--foreign'},
+    {k:'投信淨額',v:trust[L],d:dl(trust),col:'--trust'},
+    {k:'自營商淨額',v:dealer[L],d:dl(dealer),col:'--dealer'},
+    {k:'加權收盤',v:close[L],d:dl(close),col:'--price',price:true},
+  ];
+  document.getElementById('cards').innerHTML=cardData.map(c=>{
+    const dcls=c.d>=0?'up':'dn';
+    const dtxt=c.price?(c.d>=0?'▲ ':'▼ ')+fmt(Math.abs(c.d)):sign(c.d)+' 口';
+    return `<div class="card"><div class="k">${c.k}</div>
+      <div class="v" style="color:var(${c.col})">${fmt(c.v)}</div>
+      <div class="d ${dcls}">${dtxt}</div></div>`;
+  }).join('');
+  const chg5=foreign[L]-foreign[Math.max(0,L-5)];
+  const pct=percentileOf(foreign,foreign[L]);
+  const corrLevel=pearson(foreign,close);
+  const dF=[],dC=[];for(let i=1;i<rows.length;i++){dF.push(foreign[i]-foreign[i-1]);dC.push(close[i]-close[i-1]);}
+  const corrChg=pearson(dF,dC);
+  const statData=[
+    {k:'外資淨額 5日變化',v:sign(chg5)+' 口',n:chg5>0?'空單回補／偏多修正':'空單加碼／偏空'},
+    {k:'目前部位百分位',v:pct.toFixed(0)+'%',n:`區間 ${rows.length} 日中，越低＝越偏空的極端`,bar:pct},
+    {k:'外資淨額↔收盤（水位）',v:isNaN(corrLevel)?'—':corrLevel.toFixed(2),n:'長期水位同向程度，±1 為完全相關'},
+    {k:'Δ外資↔Δ收盤（變化）',v:isNaN(corrChg)?'—':corrChg.toFixed(2),n:'每日增減同向程度，較貼近盤感'},
+  ];
+  document.getElementById('stats').innerHTML=statData.map(s=>`
+    <div class="stat"><div class="k">${s.k}</div><div class="v">${s.v}</div>
+    <div class="n">${s.n}</div>${s.bar!=null?`<div class="bar"><i style="width:${s.bar}%"></i></div>`:''}</div>`).join('');
+  document.getElementById('asof').textContent=
+    '資料截至 '+rows[L][0]+'（民國）· '+labels[L]+' 收盤 · 共 '+rows.length+' 個交易日';
+
+  const gridC=css('--grid');
+  if(oiChart)oiChart.destroy();
+  oiChart=new Chart(document.getElementById('oiChart'),{
+    type:'line',
+    data:{labels,datasets:[
+      {label:'外資',data:foreign,borderColor:css('--foreign'),borderWidth:2,tension:.25,pointRadius:0,pointHoverRadius:4},
+      {label:'投信',data:trust,borderColor:css('--trust'),borderWidth:2,tension:.25,pointRadius:0,pointHoverRadius:4},
+      {label:'自營商',data:dealer,borderColor:css('--dealer'),borderWidth:2,tension:.25,pointRadius:0,pointHoverRadius:4},
+    ]},
+    options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.dataset.label+'：'+fmt(c.parsed.y)+' 口'}}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:12,font:{size:10}}},
+        y:{grid:{color:gridC},ticks:{callback:v=>fmt(v),font:{size:10}}}}}
+  });
+  if(fxChart)fxChart.destroy();
+  fxChart=new Chart(document.getElementById('fxChart'),{
+    data:{labels,datasets:[
+      {type:'line',label:'外資淨額',data:foreign,yAxisID:'y',borderColor:css('--foreign'),backgroundColor:'rgba(192,57,43,.06)',fill:true,borderWidth:2,tension:.25,pointRadius:0,pointHoverRadius:4},
+      {type:'line',label:'外資5日均',data:fMA5,yAxisID:'y',borderColor:css('--foreign'),borderWidth:1.5,borderDash:[5,3],tension:.3,pointRadius:0},
+      {type:'line',label:'加權收盤',data:close,yAxisID:'y1',borderColor:css('--price'),borderWidth:1.5,tension:.25,pointRadius:0,pointHoverRadius:4},
+    ]},
+    options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:true,labels:{boxWidth:14,font:{size:11}}},
+        tooltip:{callbacks:{label:c=>c.dataset.label+'：'+fmt(c.parsed.y)+(c.dataset.yAxisID==='y'?' 口':'')}}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:12,font:{size:10}}},
+        y:{position:'left',grid:{color:gridC},ticks:{callback:v=>fmt(v),font:{size:10}},title:{display:true,text:'外資口數',font:{size:10}}},
+        y1:{position:'right',grid:{display:false},ticks:{callback:v=>fmt(v),font:{size:10}},title:{display:true,text:'收盤',font:{size:10}}}}}
+  });
+  renderFund();
+  renderMargin();
+  renderTable();
+}
+
+let fundChart, xfxChart, marginChart;
+function renderFund(){
+  const fb=document.getElementById('fundChart');
+  if(!fb) return;
+  if(!fund.length){ // 沒有買賣超資料時清空圖表
+    if(fundChart){fundChart.destroy();fundChart=null;}
+    if(xfxChart){xfxChart.destroy();xfxChart=null;}
+    return;
+  }
+  const gridC=css('--grid');
+  const fr=fund.slice().sort((a,b)=>dkey(a[0])-dkey(b[0])); // 由舊到新
+  const flabels=fr.map(r=>r[0].slice(4));
+  const ftrust=fr.map(r=>r[1]), fdealer=fr.map(r=>r[2]), fforeign=fr.map(r=>r[3]);
+
+  if(fundChart)fundChart.destroy();
+  fundChart=new Chart(fb,{
+    type:'bar',
+    data:{labels:flabels,datasets:[
+      {label:'外資',data:fforeign,backgroundColor:css('--foreign')},
+      {label:'投信',data:ftrust,backgroundColor:css('--trust')},
+      {label:'自營商',data:fdealer,backgroundColor:css('--dealer')},
+    ]},
+    options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.dataset.label+'：'+(c.parsed.y>0?'+':'')+c.parsed.y.toFixed(1)+' 億'}}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:12,font:{size:10}}},
+        y:{grid:{color:gridC},ticks:{callback:v=>fmt(v),font:{size:10}},title:{display:true,text:'億元',font:{size:10}}}}}
+  });
+
+  // 外資：現貨買賣超（bar）vs 期貨未平倉（line），以日期對齊
+  const oiMap=new Map(raw.map(r=>[r[0],r[5]]));  // date_roc -> 外資期貨口數
+  const common=fr.filter(r=>oiMap.has(r[0]));
+  const xlabels=common.map(r=>r[0].slice(4));
+  const xspot=common.map(r=>r[3]);
+  const xfut=common.map(r=>oiMap.get(r[0]));
+  const xb=document.getElementById('xfxChart');
+  if(xfxChart)xfxChart.destroy();
+  xfxChart=new Chart(xb,{
+    data:{labels:xlabels,datasets:[
+      {type:'bar',label:'外資現貨買賣超',data:xspot,yAxisID:'y',backgroundColor:common.map(r=>r[3]>=0?css('--trust'):css('--foreign'))},
+      {type:'line',label:'外資期貨未平倉',data:xfut,yAxisID:'y1',borderColor:css('--price'),borderWidth:1.8,tension:.25,pointRadius:0,pointHoverRadius:4},
+    ]},
+    options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:true,labels:{boxWidth:14,font:{size:11}}},
+        tooltip:{callbacks:{label:c=>c.dataset.label+'：'+fmt(c.parsed.y)+(c.dataset.yAxisID==='y'?' 億':' 口')}}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:12,font:{size:10}}},
+        y:{position:'left',grid:{color:gridC},ticks:{callback:v=>fmt(v),font:{size:10}},title:{display:true,text:'現貨(億)',font:{size:10}}},
+        y1:{position:'right',grid:{display:false},ticks:{callback:v=>fmt(v),font:{size:10}},title:{display:true,text:'期貨(口)',font:{size:10}}}}}
+  });
+}
+function renderMargin(){
+  const mb=document.getElementById('marginChart');
+  if(!mb) return;
+  if(!margin || !margin.length){ if(marginChart){marginChart.destroy();marginChart=null;} return; }
+  const gridC=css('--grid');
+  const mr=margin.slice().sort((a,b)=>dkey(a[0])-dkey(b[0])); // 舊到新
+  const mlabels=mr.map(r=>r[0].slice(4));
+  const mbal=mr.map(r=>r[1]);
+  // 對齊加權收盤（來自未平倉資料的收盤欄）
+  const closeMap=new Map(raw.map(r=>[r[0],r[8]]));
+  const mclose=mr.map(r=>closeMap.has(r[0])?closeMap.get(r[0]):null);
+  if(marginChart)marginChart.destroy();
+  marginChart=new Chart(mb,{
+    data:{labels:mlabels,datasets:[
+      {type:'line',label:'融資餘額',data:mbal,yAxisID:'y',borderColor:css('--dealer'),
+        backgroundColor:'rgba(201,138,30,.08)',fill:true,borderWidth:2,tension:.25,pointRadius:0,pointHoverRadius:4},
+      {type:'line',label:'加權收盤',data:mclose,yAxisID:'y1',borderColor:css('--price'),
+        borderWidth:1.5,tension:.25,pointRadius:0,pointHoverRadius:4,spanGaps:true},
+    ]},
+    options:{maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:true,labels:{boxWidth:14,font:{size:11}}},
+        tooltip:{callbacks:{label:c=>c.dataset.label+'：'+fmt(c.parsed.y)+(c.dataset.yAxisID==='y'?' 億':'')}}},
+      scales:{x:{grid:{display:false},ticks:{maxTicksLimit:12,font:{size:10}}},
+        y:{position:'left',grid:{color:gridC},ticks:{callback:v=>fmt(v),font:{size:10}},title:{display:true,text:'融資(億)',font:{size:10}}},
+        y1:{position:'right',grid:{display:false},ticks:{callback:v=>fmt(v),font:{size:10}},title:{display:true,text:'收盤',font:{size:10}}}}}
+  });
+}
+function renderTable(){
+  const tbody=document.querySelector('#tbl tbody');
+  const slice=raw.slice(0,tableN);
+  tbody.innerHTML=slice.map((r,i)=>{
+    const prev=raw[i+1]; const dF=prev?r[5]-prev[5]:null;
+    const cell=v=>`<td class="${v<0?'neg':'pos'}">${fmt(v)}</td>`;
+    const dCell=dF==null?'<td>—</td>':`<td class="${dF<0?'neg':'pos'}">${sign(dF)}</td>`;
+    return `<tr><td>${r[0]}</td>${cell(r[5])}${dCell}${cell(r[6])}${cell(r[7])}${cell(r[1])}<td>${fmt(r[8])}</td></tr>`;
+  }).join('');
+}
+
+// ---- 事件 ----
+document.getElementById('csvUrl').value=DEFAULT_URL;
+document.getElementById('reloadBtn').addEventListener('click',()=>autoload(document.getElementById('csvUrl').value.trim()||DEFAULT_URL));
+document.getElementById('fetchUrlBtn').addEventListener('click',()=>autoload(document.getElementById('csvUrl').value.trim()||DEFAULT_URL));
+document.getElementById('mergeBtn').addEventListener('click',()=>{
+  const msg=document.getElementById('msg');
+  const {out,bad}=parsePaste(document.getElementById('pasteBox').value);
+  if(!out.length){msg.textContent='沒有解析到有效資料列（日期需為民國 115/08/20 形式）。';return;}
+  const {added,updated}=mergeData(out); render();
+  setStatus('ok','已手動更新 · 共 <b>'+raw.length+'</b> 筆');
+  msg.textContent=`新增 ${added} 列、覆蓋 ${updated} 列${bad?`，略過 ${bad} 列`:''}。`;
+});
+document.getElementById('clearBtn').addEventListener('click',()=>{document.getElementById('pasteBox').value='';document.getElementById('msg').textContent='';});
+document.querySelectorAll('#rangeToggle button').forEach(b=>{
+  b.addEventListener('click',()=>{document.querySelectorAll('#rangeToggle button').forEach(x=>x.classList.remove('on'));b.classList.add('on');tableN=+b.dataset.n;renderTable();});
+});
+
+// 啟動：先嘗試自動載入預設網址
+autoload(DEFAULT_URL);
+</script>
+</body>
+</html>
