@@ -1,1 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台股總覽 · 持股 + 籌碼</title>
+<style>
+  :root{ --bg:#0f1420; --line:#2b3448; --ink:#e8ecf4; --muted:#8b96ad; --accent:#6e8fff; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg)}
+  body{font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;color:var(--ink)}
+  .navbar{position:sticky;top:0;z-index:10;background:rgba(15,20,32,.92);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;padding:10px 16px;flex-wrap:wrap}
+  .navbar .brand{font-size:14px;font-weight:800;letter-spacing:.02em;margin-right:10px}
+  .tab{font-size:14px;font-weight:600;color:var(--muted);cursor:pointer;border:1px solid var(--line);
+    background:#161c2b;border-radius:999px;padding:7px 18px;transition:.15s;user-select:none}
+  .tab:hover{color:var(--ink)}
+  .tab.active{background:var(--accent);border-color:var(--accent);color:#0b1020}
+  .navbar .spacer{flex:1}
+  .navbar .reload{font-size:13px;color:var(--accent);cursor:pointer;border:1px solid var(--line);
+    background:#161c2b;border-radius:999px;padding:7px 14px}
+  .navbar .reload:hover{border-color:var(--accent)}
+  iframe{width:100%;border:0;display:block;background:var(--bg)}
+  .pane{display:none}
+  .pane.show{display:block}
+</style>
+</head>
+<body>
+  <div class="navbar">
+    <span class="brand">台股總覽</span>
+    <span class="tab active" data-pane="holdings">我的持股</span>
+    <span class="tab" data-pane="chips">大盤籌碼</span>
+    <span class="spacer"></span>
+    <span class="reload" id="reloadCur">↻ 重新載入</span>
+  </div>
 
+  <div class="pane show" id="pane-holdings">
+    <iframe id="fHold" src="index.html" scrolling="no" title="我的持股"></iframe>
+  </div>
+  <div class="pane" id="pane-chips">
+    <iframe id="fChips" src="chips.html" scrolling="no" title="大盤籌碼" data-src="chips.html"></iframe>
+  </div>
+
+<script>
+function fit(f){
+  try{
+    const d=f.contentDocument||(f.contentWindow&&f.contentWindow.document);
+    if(!d||!d.body) return;
+    const h=Math.max(d.body.scrollHeight, d.documentElement.scrollHeight);
+    if(h>0) f.style.height=(h+20)+'px';
+  }catch(e){}
+}
+const frames={holdings:document.getElementById('fHold'), chips:document.getElementById('fChips')};
+let current='holdings';
+
+['fHold','fChips'].forEach(id=>{
+  const f=document.getElementById(id);
+  f.addEventListener('load',()=>{ fit(f); setTimeout(()=>fit(f),600); setTimeout(()=>fit(f),1500); });
+});
+// 只需校正目前顯示的那個框架高度
+setInterval(()=>fit(frames[current]), 2000);
+window.addEventListener('resize',()=>fit(frames[current]));
+
+document.querySelectorAll('.tab').forEach(t=>{
+  t.addEventListener('click',()=>{
+    const pane=t.dataset.pane;
+    document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===t));
+    document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('show',p.id==='pane-'+pane));
+    current=pane;
+    window.scrollTo(0,0);
+    setTimeout(()=>fit(frames[current]),50);   // 切換後重新量高度
+  });
+});
+
+// 重新載入目前這個頁籤的框架，抓最新資料
+document.getElementById('reloadCur').addEventListener('click',()=>{
+  const f=frames[current];
+  f.src=f.src.split('#')[0];
+});
+</script>
+</body>
+</html>
