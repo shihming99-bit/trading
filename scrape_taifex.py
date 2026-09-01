@@ -260,13 +260,20 @@ TICKER_RE = _re.compile(r"^\d{4,6}[A-Z]?$")   # 2330 / 00981A / 6719 等
 
 
 def _fetch_json(url: str):
-    """帶重試的 JSON 抓取（官方 API）。"""
+    """帶重試的 JSON 抓取（官方 API）。用 requests 以自動跟隨 3xx 轉址（如 MI_MARGN 的 307）。"""
     last_err = None
+    hdrs = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Referer": "https://www.twse.com.tw/",
+    }
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            req = _urlreq.Request(url, headers={"User-Agent": HEADERS["User-Agent"]})
-            with _urlreq.urlopen(req, timeout=TIMEOUT) as resp:
-                return _json.loads(resp.read().decode("utf-8"))
+            r = requests.get(url, headers=hdrs, timeout=TIMEOUT, allow_redirects=True)
+            r.raise_for_status()
+            r.encoding = "utf-8"
+            return r.json()
         except Exception as e:
             last_err = e
             wait = BACKOFF * attempt
